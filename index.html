@@ -1,1 +1,677 @@
 
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Simulador de Préstamos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        dark: { 900: '#0f172a', 800: '#1e293b', 700: '#334155' },
+                        brand: { red: '#dc2626', yellow: '#facc15' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { 
+            background-color: #0f172a; 
+            color: #f8fafc;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* Custom Scrollbar for tables */
+        .table-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .table-scroll::-webkit-scrollbar-track { background: #1e293b; border-radius: 4px; }
+        .table-scroll::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        
+        /* App-like transitions */
+        .fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        /* Floating Action Button */
+        .fab { box-shadow: 0 4px 12px rgba(220, 38, 38, 0.4); }
+        
+        /* Hide number input spinners */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        
+        /* Print Styles para PDF */
+        @media print {
+            body { background: white !important; color: black !important; height: auto !important; overflow: visible !important; }
+            header, button, #modalAmort, #modalDelete1, #modalDelete2 { display: none !important; }
+            main { padding: 0 !important; overflow: visible !important; }
+            .bg-dark-800, .bg-dark-900, .bg-dark-700 { background: white !important; border: 1px solid #ddd !important; box-shadow: none !important; color: black !important; }
+            .text-white, .text-brand-yellow, .text-brand-red, .text-dark-300, .text-dark-400 { color: black !important; }
+            .border-dark-700, .border-dark-600 { border-color: #ddd !important; }
+            .table-scroll { max-height: none !important; overflow: visible !important; }
+            table { page-break-inside: auto; width: 100% !important; }
+            tr { page-break-inside: avoid; page-break-after: auto; border-bottom: 1px solid #ddd !important; }
+            td, th { color: black !important; }
+            .h-\[400px\] { height: auto !important; }
+        }
+    </style>
+</head>
+<body class="antialiased h-screen flex flex-col overflow-hidden">
+
+    <!-- App Header -->
+    <header class="bg-dark-800 border-b border-dark-700 p-4 shadow-md z-10 flex justify-between items-center shrink-0">
+        <div class="flex items-center gap-2" id="headerTitle" onclick="app.navigate('dashboard')" style="cursor:pointer;">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-brand-red" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clip-rule="evenodd" />
+            </svg>
+            <h1 class="text-xl font-bold text-white tracking-tight">Simulador de <span class="text-brand-yellow">Préstamos</span></h1>
+        </div>
+        <button id="btnBack" class="hidden text-brand-yellow font-medium text-sm px-3 py-1 rounded-lg bg-dark-700 hover:bg-dark-600 transition">
+            Volver
+        </button>
+    </header>
+
+    <!-- Main Content Area -->
+    <main id="appContent" class="flex-1 overflow-y-auto p-4 relative pb-24"></main>
+
+    <script>
+        // Utilities
+        const fmtMoney = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' });
+        
+        // App State
+        const app = {
+            view: 'dashboard',
+            activeLoanId: null,
+            loans: JSON.parse(localStorage.getItem('loanmaster_data')) || [],
+            
+            save() {
+                localStorage.setItem('loanmaster_data', JSON.stringify(this.loans));
+            },
+            
+            navigate(view, loanId = null) {
+                this.view = view;
+                this.activeLoanId = loanId;
+                this.render();
+            },
+
+            calculateAmortization(loan) {
+                let balance = parseFloat(loan.capital);
+                let monthlyRate = (parseFloat(loan.tin) / 100) / 12;
+                let originalMonths = parseInt(loan.months);
+                let baseDate = loan.startDate ? new Date(loan.startDate) : new Date();
+                
+                let pmt = 0;
+                if(monthlyRate > 0) {
+                    pmt = balance * (monthlyRate * Math.pow(1 + monthlyRate, originalMonths)) / (Math.pow(1 + monthlyRate, originalMonths) - 1);
+                } else {
+                    pmt = balance / originalMonths;
+                }
+
+                let schedule = [];
+                let totalInterest = 0;
+                let totalExtraPaid = 0;
+                let currentMonth = 0;
+
+                while (balance > 0.01 && currentMonth < 1200) { // Max 100 years failsafe
+                    currentMonth++;
+                    let interest = balance * monthlyRate;
+                    let principal = pmt - interest;
+                    let extra = 0;
+                    let mode = 'cuota'; // default mode
+
+                    // Check for active amortizations this month
+                    if (loan.amortizations) {
+                        loan.amortizations.forEach(a => {
+                            if (a.type === 'puntual' && parseInt(a.month) === currentMonth) {
+                                extra += parseFloat(a.amount);
+                                mode = a.mode;
+                            }
+                            if (a.type === 'periodica' && currentMonth >= parseInt(a.startMonth)) {
+                                extra += parseFloat(a.amount);
+                                mode = a.mode;
+                            }
+                        });
+                    }
+
+                    // Cap principal+extra to remaining balance
+                    if (principal + extra > balance) {
+                        if (extra >= balance) {
+                            extra = balance;
+                            principal = 0;
+                        } else {
+                            principal = balance - extra;
+                        }
+                    }
+
+                    balance -= (principal + extra);
+                    if (balance < 0) balance = 0;
+                    
+                    totalInterest += interest;
+                    totalExtraPaid += extra;
+
+                    let rowDate = new Date(baseDate);
+                    rowDate.setMonth(baseDate.getMonth() + currentMonth - 1);
+
+                    schedule.push({
+                        n: currentMonth,
+                        date: rowDate,
+                        pmt: pmt + extra, // Total money out of pocket this month
+                        basePmt: pmt,
+                        interest: interest,
+                        principal: principal,
+                        extra: extra,
+                        balance: balance
+                    });
+
+                    // If we paid extra and mode is to reduce quota, recalculate PMT
+                    if (extra > 0 && mode === 'cuota' && balance > 0) {
+                        let monthsLeft = originalMonths - currentMonth;
+                        if (monthsLeft > 0) {
+                            pmt = balance * (monthlyRate * Math.pow(1 + monthlyRate, monthsLeft)) / (Math.pow(1 + monthlyRate, monthsLeft) - 1);
+                        }
+                    }
+                }
+
+                return { schedule, totalInterest, finalMonths: currentMonth, totalExtraPaid };
+            },
+
+            renderDashboard() {
+                let totalDebt = 0;
+                let totalCapital = 0;
+                let totalInterest = 0;
+                let totalMonthly = 0;
+                
+                let loansHtml = '';
+                
+                if (this.loans.length === 0) {
+                    loansHtml = `
+                        <div class="text-center py-12 px-4 fade-in">
+                            <div class="bg-dark-800 rounded-full w-20 h-20 flex items-center justify-center mx-auto mb-4 border border-dark-700">
+                                <svg class="w-10 h-10 text-brand-yellow opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                            </div>
+                            <h3 class="text-lg font-medium text-white mb-2">Sin préstamos activos</h3>
+                            <p class="text-dark-400 text-sm">Añade tu primer préstamo para empezar a simular amortizaciones y ahorros.</p>
+                        </div>
+                    `;
+                } else {
+                    this.loans.forEach(loan => {
+                        const sim = this.calculateAmortization(loan);
+                        // Sumamos el capital pendiente MAS los intereses totales simulados
+                        totalCapital += parseFloat(loan.capital);
+                        totalInterest += sim.totalInterest;
+                        totalDebt = totalCapital + totalInterest;
+                        totalMonthly += sim.schedule[0] ? sim.schedule[0].basePmt : 0;
+                        
+                        loansHtml += `
+                            <div onclick="app.navigate('loan_detail', '${loan.id}')" class="bg-dark-800 border border-dark-700 p-5 rounded-2xl mb-4 active:scale-95 transition-transform cursor-pointer relative overflow-hidden">
+                                <div class="absolute top-0 left-0 w-1 h-full bg-brand-red"></div>
+                                <div class="flex justify-between items-start mb-4">
+                                    <h3 class="font-semibold text-lg text-white">${loan.name}</h3>
+                                    <span class="bg-dark-700 text-brand-yellow text-xs px-2 py-1 rounded-md font-bold">${+(loan.tin / 12).toFixed(3)}% mensual</span>
+                                </div>
+                                
+                                <div class="bg-dark-900/50 rounded-xl p-3 mb-3 border border-dark-700">
+                                    <p class="text-xs text-dark-300 mb-1">Total Deuda</p>
+                                    <p class="text-xl font-extrabold text-brand-red mb-2">${fmtMoney.format(loan.capital + sim.totalInterest)}</p>
+                                    <div class="flex justify-between text-sm">
+                                        <div>
+                                            <p class="text-[10px] text-dark-400 uppercase mb-0.5">Solo Capital</p>
+                                            <p class="font-medium text-white">${fmtMoney.format(loan.capital)}</p>
+                                        </div>
+                                        <div class="text-right">
+                                            <p class="text-[10px] text-dark-400 uppercase mb-0.5">Solo Intereses</p>
+                                            <p class="font-medium text-brand-yellow">${fmtMoney.format(sim.totalInterest)}</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="flex justify-between items-center">
+                                    <p class="text-dark-400 text-xs">Cuota Base Mensual</p>
+                                    <p class="text-sm font-bold text-gray-300 bg-dark-700 px-2 py-1 rounded">${fmtMoney.format(sim.schedule[0]?.basePmt || 0)}/m</p>
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+
+                return `
+                    <div class="fade-in space-y-6">
+                        <!-- Global Summary -->
+                        <div class="bg-gradient-to-br from-brand-red to-red-900 rounded-3xl p-6 shadow-lg border border-red-500/30">
+                            <h2 class="text-red-200 text-sm font-medium mb-1 uppercase tracking-wider">Deuda Total (Capital + Intereses)</h2>
+                            <p class="text-4xl font-extrabold text-white mb-4 tracking-tight">${fmtMoney.format(totalDebt)}</p>
+                            
+                            <div class="grid grid-cols-2 gap-4 mb-4 text-sm">
+                                <div class="bg-black/20 rounded-xl p-3 backdrop-blur-sm">
+                                    <p class="text-red-200 text-xs">Solo Capital</p>
+                                    <p class="text-white font-bold">${fmtMoney.format(totalCapital)}</p>
+                                </div>
+                                <div class="bg-black/20 rounded-xl p-3 backdrop-blur-sm">
+                                    <p class="text-red-200 text-xs">Solo Intereses</p>
+                                    <p class="text-white font-bold">${fmtMoney.format(totalInterest)}</p>
+                                </div>
+                            </div>
+
+                            <div class="bg-black/20 rounded-xl p-3 flex justify-between items-center backdrop-blur-sm">
+                                <div>
+                                    <p class="text-red-200 text-xs">Carga mensual aprox.</p>
+                                    <p class="text-white font-bold text-lg">${fmtMoney.format(totalMonthly)}/mes</p>
+                                </div>
+                                <div class="w-10 h-10 bg-brand-yellow text-dark-900 rounded-full flex items-center justify-center font-bold">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Loan List -->
+                        <div>
+                            <div class="flex justify-between items-center mb-4">
+                                <h2 class="text-lg font-bold text-white">Tus Préstamos</h2>
+                                <button onclick="app.navigate('loan_form')" class="bg-brand-yellow text-dark-900 font-bold px-3 py-1.5 rounded-lg text-sm hover:bg-yellow-400 transition flex items-center gap-1 shadow-lg shadow-yellow-500/20">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                                    Añadir
+                                </button>
+                            </div>
+                            ${loansHtml}
+                        </div>
+                    </div>
+                `;
+            },
+
+            renderLoanForm() {
+                const today = new Date().toISOString().split('T')[0];
+                return `
+                    <div class="fade-in max-w-lg mx-auto">
+                        <h2 class="text-2xl font-bold text-white mb-6">Añadir Préstamo</h2>
+                        <form id="formLoan" onsubmit="app.saveLoan(event)" class="space-y-5">
+                            <div>
+                                <label class="block text-sm font-medium text-dark-400 mb-1">Nombre / Entidad</label>
+                                <input type="text" id="l_name" required placeholder="Ej: Coche, Lendrock, Reforma..." class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow focus:ring-1 focus:ring-brand-yellow transition">
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium text-dark-400 mb-1">Fecha Próxima Cuota / Inicio</label>
+                                <input type="date" id="l_startDate" required value="${today}" class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow transition">
+                                <style>
+                                    /* Fix para que el icono del calendario se vea blanco en modo oscuro */
+                                    ::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.7; cursor: pointer; }
+                                </style>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-dark-400 mb-1">Capital Pendiente (€)</label>
+                                <input type="number" id="l_capital" step="0.01" required placeholder="Ej: 15000" class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow transition text-lg font-semibold">
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-dark-400 mb-1">Meses Restantes</label>
+                                    <input type="number" id="l_months" required placeholder="Ej: 110" class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow transition">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-dark-400 mb-1">Interés Mensual (%)</label>
+                                    <input type="number" id="l_interes_mensual" step="0.001" required placeholder="Ej: 0.75" class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow transition">
+                                </div>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium text-dark-400 mb-1">TAE (%) <span class="text-xs opacity-50">- Informativo</span></label>
+                                <input type="number" id="l_tae" step="0.01" placeholder="Ej: 10.43" class="w-full bg-dark-800 border border-dark-600 text-white rounded-xl px-4 py-3 focus:outline-none focus:border-brand-yellow transition">
+                            </div>
+
+                            <button type="submit" class="w-full bg-brand-red hover:bg-red-700 text-white font-bold rounded-xl py-4 mt-4 transition shadow-lg shadow-red-500/20">
+                                Guardar Préstamo
+                            </button>
+                        </form>
+                    </div>
+                `;
+            },
+
+            saveLoan(e) {
+                e.preventDefault();
+                const monthlyInt = parseFloat(document.getElementById('l_interes_mensual').value);
+                
+                const newLoan = {
+                    id: Date.now().toString(),
+                    name: document.getElementById('l_name').value,
+                    startDate: document.getElementById('l_startDate').value,
+                    capital: parseFloat(document.getElementById('l_capital').value),
+                    months: parseInt(document.getElementById('l_months').value),
+                    tin: monthlyInt * 12, // Guardamos el anual internamente para no romper los cálculos
+                    tae: parseFloat(document.getElementById('l_tae').value) || 0,
+                    amortizations: []
+                };
+                this.loans.push(newLoan);
+                this.save();
+                this.navigate('dashboard');
+            },
+
+            requestDelete() {
+                document.getElementById('modalDelete1').classList.remove('hidden');
+            },
+
+            showDeleteStep2() {
+                document.getElementById('modalDelete1').classList.add('hidden');
+                document.getElementById('modalDelete2').classList.remove('hidden');
+            },
+
+            executeDelete(id) {
+                this.loans = this.loans.filter(l => l.id !== id);
+                this.save();
+                this.navigate('dashboard');
+            },
+
+            downloadPDF() {
+                // Llama al sistema nativo para generar el PDF de forma limpia
+                window.print();
+            },
+
+            renderLoanDetail() {
+                const loan = this.loans.find(l => l.id === this.activeLoanId);
+                if(!loan) return this.navigate('dashboard');
+
+                // Calculate base (no extra amortizations) to show savings
+                const simBase = this.calculateAmortization({...loan, amortizations: []});
+                // Calculate actual (with amortizations)
+                const simReal = this.calculateAmortization(loan);
+
+                const interestSaved = simBase.totalInterest - simReal.totalInterest;
+                const monthsSaved = simBase.finalMonths - simReal.finalMonths;
+
+                // Build Table Rows
+                let tableRows = '';
+                simReal.schedule.forEach(row => {
+                    const dateStr = new Intl.DateTimeFormat('es-ES', { month: 'short', year: '2-digit' }).format(row.date);
+                    tableRows += `
+                        <tr class="border-b border-dark-700/50 ${row.extra > 0 ? 'bg-brand-yellow/10' : ''}">
+                            <td class="py-3 px-2 whitespace-nowrap text-dark-300">
+                                <span class="font-medium text-white">${row.n}</span>
+                                <span class="block text-xs capitalize text-dark-400">${dateStr}</span>
+                            </td>
+                            <td class="py-3 px-2 whitespace-nowrap font-medium text-white text-right">${fmtMoney.format(row.basePmt)}</td>
+                            <td class="py-3 px-2 whitespace-nowrap text-brand-yellow font-bold text-right">${row.extra > 0 ? '+'+fmtMoney.format(row.extra) : '-'}</td>
+                            <td class="py-3 px-2 whitespace-nowrap text-dark-300 text-right">${fmtMoney.format(row.interest)}</td>
+                            <td class="py-3 px-2 whitespace-nowrap font-semibold text-white text-right">${fmtMoney.format(row.balance)}</td>
+                        </tr>
+                    `;
+                });
+
+                // Render active amortizations list
+                let amortListHtml = '';
+                if(loan.amortizations.length > 0) {
+                    loan.amortizations.forEach((a, index) => {
+                        const typeLabel = a.type === 'puntual' ? 'Puntual' : 'Periódica';
+                        
+                        // Convertir el número de mes en una fecha real y legible
+                        const amortDateObj = new Date(loan.startDate);
+                        amortDateObj.setMonth(amortDateObj.getMonth() + (a.month || a.startMonth) - 1);
+                        const dateStr = new Intl.DateTimeFormat('es-ES', { month: 'long', year: 'numeric' }).format(amortDateObj);
+                        
+                        const monthLabel = a.type === 'puntual' ? `En ${dateStr}` : `Desde ${dateStr}`;
+                        const modeLabel = a.mode === 'cuota' ? 'Baja Cuota' : 'Baja Tiempo';
+                        amortListHtml += `
+                            <div class="flex justify-between items-center bg-dark-700/50 p-3 rounded-xl mb-2 border border-dark-600">
+                                <div>
+                                    <span class="text-xs bg-brand-red text-white px-2 py-0.5 rounded mr-2 font-bold">${typeLabel}</span>
+                                    <span class="text-white font-semibold">${fmtMoney.format(a.amount)}</span>
+                                    <p class="text-xs text-dark-300 mt-1">${monthLabel} • ${modeLabel}</p>
+                                </div>
+                                <button onclick="app.removeAmortization('${loan.id}', ${index})" class="text-dark-400 hover:text-red-400 p-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                            </div>
+                        `;
+                    });
+                }
+
+                return `
+                    <div class="fade-in max-w-2xl mx-auto space-y-6">
+                        <!-- Header / Savings -->
+                        <div class="bg-dark-800 rounded-3xl p-5 border border-dark-700 relative">
+                            <div class="absolute top-4 right-4 flex gap-2 items-center">
+                                <button onclick="app.downloadPDF()" class="bg-brand-red hover:bg-red-700 text-white font-black text-xs px-3 py-2 rounded-lg transition shadow-lg shadow-red-500/40 flex items-center gap-1" title="Descargar PDF">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                    PDF
+                                </button>
+                                <button onclick="app.requestDelete()" class="text-dark-400 hover:text-brand-red transition p-2 bg-dark-700 rounded-lg" title="Eliminar">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+                                </button>
+                            </div>
+                            <h2 class="text-2xl font-bold text-white mb-4 pr-28">${loan.name}</h2>
+                            
+                            <!-- Desglose de Deuda -->
+                            <div class="bg-dark-900/50 rounded-xl p-4 mb-5 border border-dark-700">
+                                <p class="text-sm text-dark-300 mb-1">Total Deuda (Capital + Intereses)</p>
+                                <p class="text-3xl font-extrabold text-brand-red mb-3">${fmtMoney.format(loan.capital + simReal.totalInterest)}</p>
+                                <div class="flex gap-6">
+                                    <div>
+                                        <p class="text-xs text-dark-400 mb-1">Solo Capital</p>
+                                        <p class="font-semibold text-white text-lg">${fmtMoney.format(loan.capital)}</p>
+                                    </div>
+                                    <div>
+                                        <p class="text-xs text-dark-400 mb-1">Solo Intereses</p>
+                                        <p class="font-semibold text-brand-yellow text-lg">${fmtMoney.format(simReal.totalInterest)}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div class="bg-dark-900 rounded-xl p-3 border border-dark-700">
+                                    <p class="text-xs text-dark-400 mb-1">Intereses Ahorrados</p>
+                                    <p class="text-xl font-bold ${interestSaved > 0 ? 'text-green-400' : 'text-white'}">${fmtMoney.format(Math.max(0, interestSaved))}</p>
+                                </div>
+                                <div class="bg-dark-900 rounded-xl p-3 border border-dark-700">
+                                    <p class="text-xs text-dark-400 mb-1">Tiempo Ahorrado</p>
+                                    <p class="text-xl font-bold ${monthsSaved > 0 ? 'text-brand-yellow' : 'text-white'}">${monthsSaved} meses</p>
+                                </div>
+                            </div>
+
+                            ${amortListHtml}
+
+                            <div class="flex gap-2 mt-4">
+                                <button onclick="document.getElementById('modalAmort').classList.remove('hidden')" class="flex-1 bg-brand-yellow hover:bg-yellow-400 text-dark-900 font-bold py-3 rounded-xl text-sm transition">
+                                    + Amortizar
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Table -->
+                        <div class="bg-dark-800 rounded-2xl border border-dark-700 overflow-hidden flex flex-col h-[400px]">
+                            <div class="p-3 bg-dark-900 border-b border-dark-700 flex justify-between items-center">
+                                <h3 class="font-semibold text-sm text-white">Plan de Amortización</h3>
+                                <span class="text-xs bg-dark-700 px-2 py-1 rounded text-dark-300">Total: ${simReal.finalMonths} meses</span>
+                            </div>
+                            <div class="flex-1 overflow-x-auto overflow-y-auto table-scroll">
+                                <table class="w-full text-left text-sm min-w-[500px]">
+                                    <thead class="bg-dark-800 sticky top-0 z-10 shadow-md">
+                                        <tr>
+                                            <th class="py-2 px-2 text-xs font-semibold text-dark-400">Fecha</th>
+                                            <th class="py-2 px-2 text-xs font-semibold text-dark-400 text-right">Cuota</th>
+                                            <th class="py-2 px-2 text-xs font-semibold text-brand-yellow text-right">Extra</th>
+                                            <th class="py-2 px-2 text-xs font-semibold text-dark-400 text-right">Intereses</th>
+                                            <th class="py-2 px-2 text-xs font-semibold text-dark-400 text-right">Pendiente</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-dark-700/50">
+                                        ${tableRows}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="modalAmort" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
+                        <div class="bg-dark-800 w-full max-w-md rounded-3xl sm:rounded-2xl border border-dark-600 p-6 shadow-2xl transform transition-transform translate-y-0">
+                            <div class="flex justify-between items-center mb-6">
+                                <h3 class="text-xl font-bold text-white">Nueva Amortización</h3>
+                                <button onclick="document.getElementById('modalAmort').classList.add('hidden')" class="text-dark-400 hover:text-white">✕</button>
+                            </div>
+                            
+                            <form id="formAddAmort" onsubmit="app.addAmortization(event)" class="space-y-4">
+                                <!-- Tabs -->
+                                <div class="flex bg-dark-900 rounded-lg p-1 border border-dark-700">
+                                    <label class="flex-1 text-center cursor-pointer">
+                                        <input type="radio" name="a_type" value="puntual" class="peer sr-only" checked onchange="app.toggleAmortForm()">
+                                        <div class="py-2 rounded-md text-sm font-medium peer-checked:bg-brand-red peer-checked:text-white text-dark-400 transition">Puntual</div>
+                                    </label>
+                                    <label class="flex-1 text-center cursor-pointer">
+                                        <input type="radio" name="a_type" value="periodica" class="peer sr-only" onchange="app.toggleAmortForm()">
+                                        <div class="py-2 rounded-md text-sm font-medium peer-checked:bg-brand-red peer-checked:text-white text-dark-400 transition">Periódica</div>
+                                    </label>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-dark-400 mb-1">Cantidad (€)</label>
+                                    <input type="number" id="a_amount" step="0.01" required placeholder="Ej: 1000" class="w-full bg-dark-900 border border-dark-600 text-white rounded-xl px-4 py-3 focus:border-brand-yellow font-bold text-lg">
+                                </div>
+
+                                <div id="wrap_month">
+                                    <label class="block text-sm font-medium text-dark-400 mb-1">¿En qué fecha exacta?</label>
+                                    <input type="date" id="a_date" value="${new Date().toISOString().split('T')[0]}" required class="w-full bg-dark-900 border border-dark-600 text-white rounded-xl px-4 py-3 focus:border-brand-yellow">
+                                    <style>
+                                        /* Invertir el icono en modo oscuro para que se vea blanco */
+                                        #a_date::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.7; cursor: pointer; }
+                                    </style>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-dark-400 mb-2">Estrategia del Banco</label>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <label class="cursor-pointer">
+                                            <input type="radio" name="a_mode" value="cuota" class="peer sr-only" checked>
+                                            <div class="border border-dark-600 rounded-xl p-3 text-center peer-checked:border-brand-yellow peer-checked:bg-brand-yellow/10 transition">
+                                                <span class="block text-white font-semibold text-sm mb-1">Bajar Cuota</span>
+                                                <span class="block text-xs text-dark-400">Mantener Plazo</span>
+                                            </div>
+                                        </label>
+                                        <label class="cursor-pointer">
+                                            <input type="radio" name="a_mode" value="tiempo" class="peer sr-only">
+                                            <div class="border border-dark-600 rounded-xl p-3 text-center peer-checked:border-brand-yellow peer-checked:bg-brand-yellow/10 transition">
+                                                <span class="block text-white font-semibold text-sm mb-1">Bajar Tiempo</span>
+                                                <span class="block text-xs text-dark-400">Mantener Cuota</span>
+                                            </div>
+                                        </label>
+                                    </div>
+                                    <p class="text-xs text-dark-500 mt-2 text-center">*Lendrock suele bajar la cuota por defecto.</p>
+                                </div>
+
+                                <button type="submit" class="w-full bg-brand-yellow hover:bg-yellow-400 text-dark-900 font-bold rounded-xl py-4 mt-2 transition">
+                                    Aplicar Simulación
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Delete Confirmation Modals -->
+                    <div id="modalDelete1" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                        <div class="bg-dark-800 w-full max-w-sm rounded-3xl border border-dark-600 p-6 shadow-2xl text-center transform transition-transform scale-100 fade-in">
+                            <div class="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <svg class="w-8 h-8 text-brand-red" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-2">¿Eliminar préstamo?</h3>
+                            <p class="text-dark-400 text-sm mb-6">Estás a punto de borrar este préstamo y todas sus simulaciones de la aplicación.</p>
+                            <div class="flex gap-3">
+                                <button onclick="document.getElementById('modalDelete1').classList.add('hidden')" class="flex-1 bg-dark-700 hover:bg-dark-600 text-white font-medium py-3 rounded-xl transition">Cancelar</button>
+                                <button onclick="app.showDeleteStep2()" class="flex-1 bg-brand-red hover:bg-red-700 text-white font-medium py-3 rounded-xl transition shadow-lg shadow-red-500/20">Sí, eliminar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="modalDelete2" class="hidden fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                        <div class="bg-dark-900 w-full max-w-sm rounded-3xl border border-brand-red p-6 shadow-2xl shadow-red-900/50 text-center transform scale-105 transition-transform fade-in">
+                            <div class="w-16 h-16 bg-red-600 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse shadow-lg shadow-red-500/50">
+                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-2">¿Estás totalmente seguro?</h3>
+                            <p class="text-red-400 text-sm mb-6 font-medium">Esta acción no se puede deshacer. Perderás todos los datos definitivamente.</p>
+                            <div class="flex gap-3 flex-col sm:flex-row">
+                                <button onclick="document.getElementById('modalDelete2').classList.add('hidden')" class="flex-1 bg-dark-700 hover:bg-dark-600 text-white font-medium py-3 rounded-xl transition">Mejor no</button>
+                                <button onclick="app.executeDelete('${loan.id}')" class="flex-1 bg-brand-red hover:bg-red-700 text-white font-black py-3 rounded-xl transition shadow-xl shadow-red-600/40 tracking-wider">¡BORRAR!</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            },
+
+            toggleAmortForm() {
+                const type = document.querySelector('input[name="a_type"]:checked').value;
+                const lbl = document.querySelector('#wrap_month label');
+                if(type === 'puntual') {
+                    lbl.textContent = '¿En qué fecha exacta?';
+                } else {
+                    lbl.textContent = '¿A partir de qué fecha?';
+                }
+            },
+
+            addAmortization(e) {
+                e.preventDefault();
+                const loan = this.loans.find(l => l.id === this.activeLoanId);
+                const type = document.querySelector('input[name="a_type"]:checked').value;
+                const mode = document.querySelector('input[name="a_mode"]:checked').value;
+                
+                // Extraer y calcular los meses de diferencia entre el inicio del préstamo y la fecha elegida
+                const amortDateObj = new Date(document.getElementById('a_date').value);
+                const startDateObj = new Date(loan.startDate);
+                
+                let monthDiff = (amortDateObj.getFullYear() - startDateObj.getFullYear()) * 12 + (amortDateObj.getMonth() - startDateObj.getMonth()) + 1;
+                
+                // Prevención: Si se pone una fecha anterior al inicio, se aplica en el mes 1
+                if (monthDiff < 1) monthDiff = 1; 
+
+                const newAmort = {
+                    type: type,
+                    mode: mode,
+                    amount: parseFloat(document.getElementById('a_amount').value),
+                };
+                
+                if (type === 'puntual') {
+                    newAmort.month = monthDiff;
+                } else {
+                    newAmort.startMonth = monthDiff;
+                }
+
+                loan.amortizations.push(newAmort);
+                this.save();
+                this.render(); // Re-render to close modal and update tables
+            },
+
+            removeAmortization(loanId, index) {
+                const loan = this.loans.find(l => l.id === loanId);
+                loan.amortizations.splice(index, 1);
+                this.save();
+                this.render();
+            },
+
+            render() {
+                const content = document.getElementById('appContent');
+                const btnBack = document.getElementById('btnBack');
+                const title = document.getElementById('headerTitle');
+
+                if (this.view === 'dashboard') {
+                    btnBack.classList.add('hidden');
+                    title.classList.remove('pointer-events-none');
+                    content.innerHTML = this.renderDashboard();
+                } 
+                else if (this.view === 'loan_form') {
+                    btnBack.classList.remove('hidden');
+                    btnBack.onclick = () => this.navigate('dashboard');
+                    content.innerHTML = this.renderLoanForm();
+                }
+                else if (this.view === 'loan_detail') {
+                    btnBack.classList.remove('hidden');
+                    btnBack.onclick = () => this.navigate('dashboard');
+                    content.innerHTML = this.renderLoanDetail();
+                }
+            }
+        };
+
+        // Initialize App
+        window.onload = () => {
+            app.render();
+        };
+    </script>
+</body>
+</html>
